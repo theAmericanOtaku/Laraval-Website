@@ -5,13 +5,18 @@ namespace Tests\Feature;
 use App\Models\Order;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
-use Stripe\ApiRequestor;
-use Stripe\HttpClient\ClientInterface;
+use Tests\Support\FakeStripe;
 use Tests\TestCase;
 
 class PaymentsTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function tearDown(): void
+    {
+        FakeStripe::uninstall();
+        parent::tearDown();
+    }
 
     public function test_shop_page_lists_products(): void
     {
@@ -110,22 +115,13 @@ class PaymentsTest extends TestCase
         config(['services.stripe.secret' => 'rk_test_fake']);
         $order = $this->stripeOrder();
 
-        // Stand in for Stripe's API: every request returns this paid Checkout Session.
-        ApiRequestor::setHttpClient(new class implements ClientInterface
-        {
-            public function request($method, $absUrl, $headers, $params, $hasFile, $apiMode = 'v1', $maxNetworkRetries = null)
-            {
-                return [json_encode(['id' => 'cs_test_1', 'object' => 'checkout.session', 'payment_status' => 'paid']), 200, []];
-            }
-        });
+        FakeStripe::install([
+            'GET /v1/checkout/sessions/cs_test_1' => ['id' => 'cs_test_1', 'object' => 'checkout.session', 'payment_status' => 'paid'],
+        ]);
 
-        try {
-            $this->get('/checkout/stripe/success?session_id=cs_test_1')
-                ->assertRedirect(route('orders.show', [$order, 'confirming' => 1]))
-                ->assertSessionHas('notice');
-        } finally {
-            ApiRequestor::setHttpClient(null);
-        }
+        $this->get('/checkout/stripe/success?session_id=cs_test_1')
+            ->assertRedirect(route('orders.show', [$order, 'confirming' => 1]))
+            ->assertSessionHas('notice');
 
         $this->assertSame('pending', $order->fresh()->status);
         $this->get(route('orders.show', [$order, 'confirming' => 1]))->assertSee('http-equiv="refresh"', false);

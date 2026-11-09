@@ -1,6 +1,17 @@
 @extends('shop.layout')
 
+@if(request()->boolean('confirming') && $order->status === 'pending')
+    {{-- Just back from Stripe: reload every 3 seconds until the webhook marks the order. --}}
+    @push('head')<meta http-equiv="refresh" content="3">@endpush
+@endif
+
 @section('content')
+    @if(session('notice'))
+        <div class="flash">{{ session('notice') }}</div>
+    @endif
+    @if(request()->boolean('confirming') && $order->status === 'pending')
+        <p class="muted">Waiting for Stripe's webhook to confirm this payment… this page refreshes itself.</p>
+    @endif
     <div class="card">
         <h2>Order #{{ $order->id }} <span class="badge {{ $order->status }}">{{ $order->status }}</span></h2>
         <p>{{ ucfirst($order->provider) }} · {{ $order->product }} · {{ $order->formattedAmount() }}</p>

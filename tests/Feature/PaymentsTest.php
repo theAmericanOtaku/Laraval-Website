@@ -5,6 +5,8 @@ namespace Tests\Feature;
 use App\Models\Order;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
+use Stripe\ApiRequestor;
+use Stripe\HttpClient\ClientInterface;
 use Tests\TestCase;
 
 class PaymentsTest extends TestCase
@@ -41,27 +43,100 @@ class PaymentsTest extends TestCase
         $this->assertSame('paid', $order->fresh()->status);
     }
 
-    public function test_stripe_webhook_marks_order_paid(): void
+    private function stripeOrder(string $status = 'pending'): Order
+    {
+        return Order::create(['provider' => 'stripe', 'provider_ref' => 'cs_test_1', 'product' => 'coffee', 'amount' => 300, 'currency' => 'usd', 'status' => $status]);
+    }
+
+    /** Send a webhook signed exactly the way Stripe signs it. */
+    private function sendStripeEvent(string $type, string $paymentStatus)
     {
         config(['services.stripe.webhook_secret' => 'whsec_test']);
-        $order = Order::create(['provider' => 'stripe', 'provider_ref' => 'cs_test_1', 'product' => 'coffee', 'amount' => 300, 'currency' => 'usd']);
 
         $payload = json_encode([
-            'id' => 'evt_1', 'object' => 'event', 'type' => 'checkout.session.completed',
-            'data' => ['object' => ['id' => 'cs_test_1', 'object' => 'checkout.session', 'payment_status' => 'paid']],
+            'id' => 'evt_1', 'object' => 'event', 'type' => $type,
+            'data' => ['object' => ['id' => 'cs_test_1', 'object' => 'checkout.session', 'payment_status' => $paymentStatus]],
         ]);
         $t = time();
         $sig = "t=$t,v1=".hash_hmac('sha256', "$t.$payload", 'whsec_test');
 
-        $this->call('POST', '/webhooks/stripe', [], [], [], ['HTTP_STRIPE_SIGNATURE' => $sig, 'CONTENT_TYPE' => 'application/json'], $payload)
-            ->assertOk();
+        return $this->call('POST', '/webhooks/stripe', [], [], [], ['HTTP_STRIPE_SIGNATURE' => $sig, 'CONTENT_TYPE' => 'application/json'], $payload);
+    }
+
+    public function test_completed_webhook_marks_card_payment_paid(): void
+    {
+        $order = $this->stripeOrder();
+        $this->sendStripeEvent('checkout.session.completed', 'paid')->assertOk();
         $this->assertSame('paid', $order->fresh()->status);
+    }
+
+    public function test_completed_webhook_for_delayed_payment_stays_pending(): void
+    {
+        $order = $this->stripeOrder();
+        $this->sendStripeEvent('checkout.session.completed', 'unpaid')->assertOk();
+        $this->assertSame('pending', $order->fresh()->status);
+    }
+
+    public function test_async_payment_succeeded_marks_order_paid(): void
+    {
+        $order = $this->stripeOrder();
+        $this->sendStripeEvent('checkout.session.async_payment_succeeded', 'paid')->assertOk();
+        $this->assertSame('paid', $order->fresh()->status);
+    }
+
+    public function test_async_payment_failed_marks_order_failed(): void
+    {
+        $order = $this->stripeOrder();
+        $this->sendStripeEvent('checkout.session.async_payment_failed', 'unpaid')->assertOk();
+        $this->assertSame('failed', $order->fresh()->status);
+    }
+
+    public function test_late_or_duplicate_event_never_downgrades_a_paid_order(): void
+    {
+        $order = $this->stripeOrder('paid');
+        $this->sendStripeEvent('checkout.session.completed', 'unpaid')->assertOk();
+        $this->assertSame('paid', $order->fresh()->status);
+    }
+
+    public function test_unused_event_types_are_acknowledged_and_ignored(): void
+    {
+        $order = $this->stripeOrder();
+        $this->sendStripeEvent('checkout.session.expired', 'unpaid')->assertOk();
+        $this->assertSame('pending', $order->fresh()->status);
+    }
+
+    public function test_success_page_shows_status_but_does_not_mark_order_paid(): void
+    {
+        config(['services.stripe.secret' => 'rk_test_fake']);
+        $order = $this->stripeOrder();
+
+        // Stand in for Stripe's API: every request returns this paid Checkout Session.
+        ApiRequestor::setHttpClient(new class implements ClientInterface
+        {
+            public function request($method, $absUrl, $headers, $params, $hasFile, $apiMode = 'v1', $maxNetworkRetries = null)
+            {
+                return [json_encode(['id' => 'cs_test_1', 'object' => 'checkout.session', 'payment_status' => 'paid']), 200, []];
+            }
+        });
+
+        try {
+            $this->get('/checkout/stripe/success?session_id=cs_test_1')
+                ->assertRedirect(route('orders.show', [$order, 'confirming' => 1]))
+                ->assertSessionHas('notice');
+        } finally {
+            ApiRequestor::setHttpClient(null);
+        }
+
+        $this->assertSame('pending', $order->fresh()->status);
+        $this->get(route('orders.show', [$order, 'confirming' => 1]))->assertSee('http-equiv="refresh"', false);
     }
 
     public function test_stripe_webhook_rejects_bad_signature(): void
     {
         config(['services.stripe.webhook_secret' => 'whsec_test']);
+        $order = $this->stripeOrder();
         $this->call('POST', '/webhooks/stripe', [], [], [], ['HTTP_STRIPE_SIGNATURE' => 't=1,v1=bad'], '{}')->assertStatus(400);
+        $this->assertSame('pending', $order->fresh()->status);
     }
 
     public function test_cancel_marks_pending_order_cancelled(): void

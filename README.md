@@ -26,8 +26,12 @@ php artisan serve        # http://localhost:8000
    [Stripe CLI](https://docs.stripe.com/stripe-cli), then in a second terminal run:
    ```bash
    stripe login
-   stripe listen --forward-to localhost:8000/webhooks/stripe
+   stripe listen --all-snapshot --forward-to localhost:8000/webhooks/stripe
    ```
+   `--all-snapshot` forwards all standard events, and the app ignores the ones it doesn't use. Newer
+   CLI versions refuse to forward without it, and in testing `--events checkout.session.completed,...`
+   forwarded nothing. If a payment went through while the listener was off, resend it with
+   `stripe events resend evt_...`, using the id from `stripe events list -d type=checkout.session.completed`.
    Copy the `whsec_...` it prints into `STRIPE_WEBHOOK_SECRET`, and keep it running while you test.
    Without it, Stripe orders stay **pending** forever. On a live site you'd add the endpoint under
    *Developers → Webhooks* in the Dashboard instead.

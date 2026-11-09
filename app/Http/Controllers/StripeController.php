@@ -11,10 +11,11 @@ use Stripe\Webhook;
 
 /**
  * Stripe Checkout flow:
- *  1. We create a Checkout Session on our server (secret key never leaves the server).
+ *  1. We create a Checkout Session on our server (the API key never leaves the server).
  *  2. We redirect the customer to Stripe's hosted payment page.
- *  3. Stripe redirects back to success_url / cancel_url.
- *  4. (Recommended) Stripe also POSTs a webhook — the reliable source of truth.
+ *  3. Stripe redirects back to success_url / cancel_url. This page only SHOWS the result.
+ *  4. Stripe POSTs a signed webhook. The webhook is the ONLY place an order is marked
+ *     paid or failed, because the customer might close the tab before reaching step 3.
  */
 class StripeController extends Controller
 {
@@ -59,17 +60,25 @@ class StripeController extends Controller
         return redirect()->away($session->url);
     }
 
+    /**
+     * Where Stripe sends the customer after paying. Read-only: it asks Stripe for the
+     * session's status to show the customer, but never changes the order. That is the
+     * webhook's job.
+     */
     public function success(Request $request)
     {
-        // Never trust the redirect alone — fetch the session from Stripe to confirm payment.
         $session = $this->stripe()->checkout->sessions->retrieve($request->query('session_id'));
-        $order = Order::where('provider_ref', $session->id)->firstOrFail();
+        $order = Order::where('provider', 'stripe')->where('provider_ref', $session->id)->firstOrFail();
 
-        if ($session->payment_status === 'paid') {
-            $order->update(['status' => 'paid', 'payload' => $session->toArray()]);
+        $message = $session->payment_status === 'unpaid'
+            ? 'Stripe has not received the money yet. Some payment methods take a while to settle.'
+            : 'Stripe says this payment went through.';
+
+        if ($order->status === 'pending') {
+            $message .= ' This order is marked paid once the webhook arrives Running locally? Keep stripe listen running so the webhook can reach this site.';
         }
 
-        return redirect()->route('orders.show', $order);
+        return redirect()->route('orders.show', [$order, 'confirming' => 1])->with('notice', $message);
     }
 
     public function webhook(Request $request)
@@ -78,7 +87,7 @@ class StripeController extends Controller
             $event = Webhook::constructEvent(
                 $request->getContent(),
                 $request->header('Stripe-Signature'),
-                config('services.stripe.webhook_secret'),
+                (string) config('services.stripe.webhook_secret'),
             );
         } catch (\UnexpectedValueException|SignatureVerificationException $e) {
             return response('Invalid signature', 400);
@@ -86,14 +95,38 @@ class StripeController extends Controller
 
         Log::info('Stripe webhook: '.$event->type);
 
-        if ($event->type === 'checkout.session.completed') {
-            $session = $event->data->object;
-            Order::where('provider_ref', $session->id)->update([
-                'status' => $session->payment_status === 'paid' ? 'paid' : 'pending',
-                'payload' => json_encode($session->toArray()),
-            ]);
+        $session = $event->data->object;
+
+        match ($event->type) {
+            // Card payments arrive here already paid. Delayed methods (e.g. bank debits)
+            // arrive here 'unpaid' and are settled later by one of the two events below.
+            'checkout.session.completed',
+            'checkout.session.async_payment_succeeded' => $session->payment_status !== 'unpaid'
+                ? $this->markOrder($session, 'paid')
+                : $this->markOrder($session, 'pending'),
+            'checkout.session.async_payment_failed' => $this->markOrder($session, 'failed'),
+            default => null, // Ignore events we don't use.
+        };
+
+        // Always answer 2xx quickly, or Stripe retries the event.
+        return response('ok');
+    }
+
+    private function markOrder(object $session, string $status): void
+    {
+        $order = Order::where('provider', 'stripe')->where('provider_ref', $session->id)->first();
+
+        if (! $order) {
+            Log::warning("Stripe webhook for unknown session {$session->id}");
+
+            return;
         }
 
-        return response('ok');
+        // Events can arrive more than once and out of order: never downgrade a paid order.
+        if ($order->status === 'paid') {
+            return;
+        }
+
+        $order->update(['status' => $status, 'payload' => $session->toArray()]);
     }
 }

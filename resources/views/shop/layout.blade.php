@@ -27,8 +27,10 @@
         .paid { background:#dcfce7; color:#166534; } .pending { background:#fef9c3; color:#854d0e; }
         .cancelled, .failed { background:#fee2e2; color:#991b1b; }
         pre { background:#0f172a; color:#e2e8f0; padding:16px; border-radius:8px; overflow:auto; font-size:12px; }
+        .flash { background:#eef6ff; border:1px solid #bcd7fb; padding:12px 16px; border-radius:8px; margin-bottom:16px; }
         code { background:#eef; padding:1px 4px; border-radius:4px; }
     </style>
+    @stack('head')
 </head>
 <body>
 <header>

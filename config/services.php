@@ -37,8 +37,10 @@ return [
 
     // Stripe test keys: https://dashboard.stripe.com/test/apikeys
     'stripe' => [
-        'key' => env('STRIPE_KEY'),                 // pk_test_...
-        'secret' => env('STRIPE_SECRET'),           // sk_test_...
+        'key' => env('STRIPE_KEY'),                 // pk_test_... (publishable, safe to show)
+        // Prefer a restricted key (rk_test_...) allowed only "Checkout Sessions: Write".
+        // A full secret key (sk_test_...) also works, but can do anything on your account.
+        'secret' => env('STRIPE_SECRET'),
         'webhook_secret' => env('STRIPE_WEBHOOK_SECRET'), // whsec_... (from `stripe listen`)
     ],
 

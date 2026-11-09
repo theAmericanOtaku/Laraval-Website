@@ -3,15 +3,18 @@
 namespace App\Http\Controllers;
 
 use App\Models\Order;
+use App\Support\StripeCatalog;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
+use RuntimeException;
 use Stripe\Exception\SignatureVerificationException;
 use Stripe\StripeClient;
 use Stripe\Webhook;
 
 /**
  * Stripe Checkout flow:
- *  1. We create a Checkout Session on our server (the API key never leaves the server).
+ *  0. Once: `php artisan stripe:sync-products` creates each product and its price in Stripe.
+ *  1. We create a Checkout Session for that price on our server (the API key never leaves it).
  *  2. We redirect the customer to Stripe's hosted payment page.
  *  3. Stripe redirects back to success_url / cancel_url. This page only SHOWS the result.
  *  4. Stripe POSTs a signed webhook. The webhook is the ONLY place an order is marked
@@ -19,37 +22,44 @@ use Stripe\Webhook;
  */
 class StripeController extends Controller
 {
+    /**
+     * Labels every session this flow creates, so you can find them in the Stripe Dashboard
+     * and compare checkout flows. The random suffix keeps it unique to this app.
+     */
+    private const INTEGRATION_IDENTIFIER = 'payments-lab-hosted-checkout-qhvtmzrk';
+
     private function stripe(): StripeClient
     {
         abort_unless(config('services.stripe.secret'), 500, 'Set STRIPE_SECRET in .env');
 
-        return new StripeClient(config('services.stripe.secret'));
+        return StripeCatalog::client();
     }
 
     public function checkout(string $productKey)
     {
         $product = config("shop.products.$productKey") ?? abort(404);
-        $currency = config('shop.currency');
+        $stripe = $this->stripe();
+
+        // Use the Product and Price stored in Stripe (created by `php artisan stripe:sync-products`).
+        try {
+            $priceId = (new StripeCatalog($stripe))->priceIdFor($productKey);
+        } catch (RuntimeException $e) {
+            return redirect()->route('shop')->with('error', $e->getMessage());
+        }
 
         $order = Order::create([
             'provider' => 'stripe',
             'product' => $productKey,
             'amount' => $product['price'],
-            'currency' => $currency,
+            'currency' => config('shop.currency'),
         ]);
 
-        $session = $this->stripe()->checkout->sessions->create([
+        $session = $stripe->checkout->sessions->create([
             'mode' => 'payment',
-            'line_items' => [[
-                'quantity' => 1,
-                'price_data' => [
-                    'currency' => $currency,
-                    'unit_amount' => $product['price'],
-                    'product_data' => ['name' => $product['name']],
-                ],
-            ]],
+            'line_items' => [['price' => $priceId, 'quantity' => 1]],
             'client_reference_id' => (string) $order->id,
             'metadata' => ['order_id' => $order->id],
+            'integration_identifier' => self::INTEGRATION_IDENTIFIER,
             // Stripe replaces {CHECKOUT_SESSION_ID} with the real id on redirect.
             'success_url' => route('stripe.success').'?session_id={CHECKOUT_SESSION_ID}',
             'cancel_url' => route('checkout.cancel', $order),

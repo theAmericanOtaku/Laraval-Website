@@ -6,9 +6,6 @@
 @endif
 
 @section('content')
-    @if(session('notice'))
-        <div class="flash">{{ session('notice') }}</div>
-    @endif
     @if(request()->boolean('confirming') && $order->status === 'pending')
         <p class="muted">Waiting for Stripe's webhook to confirm this payment… this page refreshes itself.</p>
     @endif

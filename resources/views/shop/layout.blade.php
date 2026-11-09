@@ -39,6 +39,12 @@
     <span class="muted">Test mode only — no real money moves</span>
 </header>
 <main>
+    @if(session('error'))
+        <div class="notice">{{ session('error') }}</div>
+    @endif
+    @if(session('notice'))
+        <div class="flash">{{ session('notice') }}</div>
+    @endif
     @yield('content')
 </main>
 </body>
